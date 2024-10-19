@@ -23,6 +23,9 @@ import json
 import argparse
 import pickle
 import subprocess
+import collections
+import tabulate
+import tqdm
 
 import create_results_html
 
@@ -30,11 +33,13 @@ from evaluator import Env, Conversation, run_test
 
 import multiprocessing as mp
 
+
 def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
     """
     Runs just one test case and returns either true or false and the output.
     """
     import docker_controller
+
     env = Env()
     test.setup(env, Conversation(test_llm), test_llm, eval_llm, vision_eval_llm)
 
@@ -48,7 +53,7 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
     if env.container:
         docker_controller.async_kill_container(env.docker, env.container)
     return False, output
-                    
+
 
 def run_all_tests(test_llm, use_cache=True, which_tests=None):
     """
@@ -58,7 +63,8 @@ def run_all_tests(test_llm, use_cache=True, which_tests=None):
     test_llm = llm.LLM(test_llm, use_cache=use_cache)
     sr = {}
     for f in os.listdir("tests"):
-        if not f.endswith(".py"): continue
+        if not f.endswith(".py"):
+            continue
         if which_tests is not None and f[:-3] not in which_tests:
             continue
         try:
@@ -76,18 +82,20 @@ def run_all_tests(test_llm, use_cache=True, which_tests=None):
             for t in test_case:
                 print("Run Job", t)
                 tmp = sys.stdout
-                sys.stdout = open(os.devnull, 'w')
+                sys.stdout = open(os.devnull, "w")
 
                 test = getattr(module, t)
 
-                ok, reason = run_one_test(test, test_llm, llm.eval_llm, llm.vision_eval_llm)
+                ok, reason = run_one_test(
+                    test, test_llm, llm.eval_llm, llm.vision_eval_llm
+                )
 
                 sys.stdout = tmp
                 if ok:
                     print("Test Passes:", t)
                 else:
-                    print("Test Fails:", t, 'from', f)
-                sr[f+"."+t] = (ok, reason)
+                    print("Test Fails:", t, "from", f)
+                sr[f + "." + t] = (ok, reason)
     return sr
 
 
@@ -99,33 +107,40 @@ def get_tags():
     descriptions = {}
     tags = {}
     for f in os.listdir("tests"):
-        if not f.endswith(".py"): continue
+        if not f.endswith(".py"):
+            continue
         try:
             spec = importlib.util.spec_from_file_location(f[:-3], "tests/" + f)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
         except:
             continue
-        if 'TAGS' in dir(module):
-            test_case = [x for x in dir(module) if x.startswith("Test") and x != "TestCase"]
+        if "TAGS" in dir(module):
+            test_case = [
+                x for x in dir(module) if x.startswith("Test") and x != "TestCase"
+            ]
             for t in test_case:
-                tags[f+"."+t] = module.TAGS
-                descriptions[f+"."+t] = module.DESCRIPTION
+                tags[f + "." + t] = module.TAGS
+                descriptions[f + "." + t] = module.DESCRIPTION
     return tags, descriptions
+
 
 def get_ordered_logs(logdir):
     hashes = []
     for githash in os.listdir(logdir):
-        if '-run' in githash:
-            print("There was a breaking change in how results are stored. Please move the runs into args.logdir/[git commit hash]/[the results].")
+        if "-run" in githash:
+            print(
+                "There was a breaking change in how results are stored. Please move the runs into args.logdir/[git commit hash]/[the results]."
+            )
             exit(1)
         hashes.append(githash)
-    
-    command = ['git', 'log', '--pretty=format:%H']
+
+    command = ["git", "log", "--pretty=format:%H"]
     result = subprocess.run(command, capture_output=True, text=True)
-    commit_hashes = result.stdout.strip().split('\n')
+    commit_hashes = result.stdout.strip().split("\n")
     commit_hashes = [x for x in commit_hashes if x in hashes]
     return commit_hashes
+
 
 def load_saved_runs(output_dir, model):
     """
@@ -133,15 +148,15 @@ def load_saved_runs(output_dir, model):
     """
     saved_runs = {}
     for file in sorted(os.listdir(output_dir)):
-        if file.startswith(model+"-run"):
+        if file.startswith(model + "-run"):
             one_run = None
-            if '.json' in file:
-                with open(os.path.join(output_dir, file), 'r') as f:
+            if ".json" in file:
+                with open(os.path.join(output_dir, file), "r") as f:
                     one_run = json.loads(f.readlines()[-1])
-            elif '.p' in file:
-                one_run = pickle.load(open(os.path.join(output_dir, file), 'rb'))
+            elif ".p" in file:
+                one_run = pickle.load(open(os.path.join(output_dir, file), "rb"))
             try:
-                for k,(v1,v2) in one_run.items():
+                for k, (v1, v2) in one_run.items():
                     if k not in saved_runs:
                         saved_runs[k] = ([], [])
                     saved_runs[k][0].append(v1)
@@ -150,95 +165,151 @@ def load_saved_runs(output_dir, model):
                 print(f"Warning: Invalid JSON in file {file}")
     return saved_runs
 
-def main():
-    parser = argparse.ArgumentParser(description="Run tests on language models.")
-    parser.add_argument('--model', help='Specify a specific model to run.', type=str, action="append")
-    parser.add_argument('--all-models', help='Run all models.', action='store_true')
-    
-    parser.add_argument('--test', help='Specify a specific test to run.', type=str, action="append")
-    
-    parser.add_argument('--times', help='Number of times to run the model(s).', type=int, default=1)
-    parser.add_argument('--runid', help='Offset of the run ID for saving.', type=int, default=0)
-    parser.add_argument('--logdir', help='Output path for the results.', type=str, default='results')
-    parser.add_argument('--generate-report', help='Generate an HTML report.', action='store_true')
-    parser.add_argument('--load-saved', help='Load saved evaluations.', action='store_true')
-    parser.add_argument('--run-tests', help='Run a batch of tests.', action='store_true')
-    parser.add_argument('--only-changed', help='Only run tests that have changed since the given commit (INCLUSIVE).')
 
-    args = parser.parse_args()
+def get_all_tags_and_counts():
+    """
+    Get all tags and the total number of test cases for each tag.
+    """
+    tags, _ = get_tags()
+    tag_counts = collections.defaultdict(int)
 
-    assert args.run_tests ^ args.load_saved, "Exactly one of --run-tests or --load-saved must be specified."
-    
-    if args.all_models and args.model:
-        parser.error("The arguments --all-models and --model cannot be used together.")
-    
-    # Create the results directory if it doesn't exist
-    if not os.path.exists(args.logdir):
-        os.makedirs(args.logdir)
+    for test_tags in tags.values():
+        for tag in test_tags:
+            tag_counts[tag] += 1
 
-    models_to_run = []
-    if args.model:
-        models_to_run = args.model
-    elif args.all_models:
-        models_to_run = ["gpt-4o", "gpt-4-0125-preview", "claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-3.5-turbo-0125", "gemini-pro", "mistral-large-latest", "mistral-medium"]
+    return dict(sorted(tag_counts.items(), key=lambda x: x[1], reverse=True))
+
+
+def run_tests(args, models_to_run, tests_subset):
+    command = ["git", "rev-parse", "HEAD"]
+    result = subprocess.run(command, capture_output=True, text=True)
+    current_commit_hash = result.stdout.strip()
 
     data = {}
     for model in models_to_run:
-        if args.load_saved:
-            data[model] = {}
+        data[model] = {}
+        for i in range(args.times):
+            print(f"Running {model}, iteration {i+args.runid}")
+            result = run_all_tests(model, use_cache=False, which_tests=tests_subset)
 
-            commit_hashes = get_ordered_logs(args.logdir)
-            print("Loading data from commits")
+            for k, (v1, v2) in result.items():
+                if k not in data[model]:
+                    data[model][k] = ([], [])
+                data[model][k][0].append(v1)
+                data[model][k][1].append(v2)
 
-            for githash in commit_hashes[::-1]:
-                print(githash)
-                kvs = load_saved_runs(os.path.join(args.logdir, githash), model)
-                for k,v in kvs.items():
-                    data[model][k] = v
-        elif args.run_tests:
+            if not os.path.exists(os.path.join(args.logdir, current_commit_hash)):
+                os.mkdir(os.path.join(args.logdir, current_commit_hash))
+            with open(
+                f"{args.logdir}/{current_commit_hash}/{model}-run{i+args.runid}.p",
+                "wb",
+            ) as f:
+                pickle.dump(result, f)
 
-            tests_subset = None # run all of them
-            
-            if args.test:
-                tests_subset = args.test # run the ones the user said
-            elif args.only_changed:
-                latest_commit_finished = args.only_changed
-                command = ['git', 'diff', '--name-only', latest_commit_finished+"^", 'HEAD']
-                
-                result = subprocess.run(command, capture_output=True, text=True)
-                changed_files = result.stdout.strip().split('\n')
-                changed_files = [x.split("tests/")[1].split(".py")[0] for x in changed_files if x.startswith("tests/")]
-                print("Running the following tests:\n  -",
-                      "\n  - ".join(changed_files))
-                tests_subset = set(changed_files)
+    return data
 
-            
-            command = ['git', 'rev-parse', 'HEAD']
+
+def main():
+    parser = argparse.ArgumentParser(description="Run tests on language models.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Run tests subcommand
+    run_parser = subparsers.add_parser(
+        "run", help="Run tests and optionally generate a report"
+    )
+    run_parser.add_argument(
+        "--model", help="Specify a specific model to run.", type=str, action="append"
+    )
+    run_parser.add_argument("--all-models", help="Run all models.", action="store_true")
+    run_parser.add_argument(
+        "--test", help="Specify a specific test to run.", type=str, action="append"
+    )
+    run_parser.add_argument(
+        "--times", help="Number of times to run the model(s).", type=int, default=1
+    )
+    run_parser.add_argument(
+        "--runid", help="Offset of the run ID for saving.", type=int, default=0
+    )
+    run_parser.add_argument(
+        "--only-changed",
+        help="Only run tests that have changed since the given commit (INCLUSIVE).",
+    )
+    run_parser.add_argument(
+        "--tags", help="Specify tags to run tests for.", type=str, nargs="+"
+    )
+    run_parser.add_argument(
+        "--logdir", help="Output path for the results.", type=str, default="results"
+    )
+    run_parser.add_argument(
+        "--generate-report",
+        help="Generate an HTML report after running tests.",
+        action="store_true",
+    )
+
+    # List tags subcommand
+    subparsers.add_parser("list-tags", help="List all tags and their test case counts")
+
+    args = parser.parse_args()
+
+    if args.command == "list-tags":
+        tag_counts = get_all_tags_and_counts()
+        print(tabulate.tabulate(tag_counts.items(), headers=["Tag", "Count"]))
+    elif args.command == "run":
+        # Create the results directory if it doesn't exist
+        if not os.path.exists(args.logdir):
+            os.makedirs(args.logdir)
+
+        models_to_run = []
+        if args.model:
+            models_to_run = args.model
+        elif args.all_models:
+            models_to_run = [
+                "gpt-4o",
+                "gpt-4-0125-preview",
+                "claude-3-opus-20240229",
+                "claude-3-sonnet-20240229",
+                "gpt-3.5-turbo-0125",
+                "gemini-pro",
+                "mistral-large-latest",
+                "mistral-medium",
+            ]
+
+        tests_subset = None
+        if args.test:
+            tests_subset = args.test
+        elif args.only_changed:
+            latest_commit_finished = args.only_changed
+            command = [
+                "git",
+                "diff",
+                "--name-only",
+                latest_commit_finished + "^",
+                "HEAD",
+            ]
             result = subprocess.run(command, capture_output=True, text=True)
-            current_commit_hash = result.stdout.strip()
+            changed_files = result.stdout.strip().split("\n")
+            changed_files = [
+                x.split("tests/")[1].split(".py")[0]
+                for x in changed_files
+                if x.startswith("tests/")
+            ]
+            print("Running the following tests:\n  -", "\n  - ".join(changed_files))
+            tests_subset = set(changed_files)
+        elif args.tags:
+            tags, _ = get_tags()
+            tests_subset = set()
+            for test, test_tags in tags.items():
+                if any(tag in args.tags for tag in test_tags):
+                    tests_subset.add(test.split(".")[0])
+            print("Running tests with the following tags:", args.tags)
+            print("Selected tests:\n  -", "\n  - ".join(tests_subset))
 
-            data[model] = {}
-            for i in range(args.times):
-                print(f"Running {model}, iteration {i+args.runid}")
-                result = run_all_tests(model, use_cache=False,
-                                       which_tests=tests_subset)
+        data = run_tests(args, models_to_run, tests_subset)
 
-                for k,(v1,v2) in result.items():
-                    if k not in data[model]:
-                        data[model][k] = ([], [])
-                    data[model][k][0].append(v1)
-                    data[model][k][1].append(v2)
+        if args.generate_report:
+            tags, descriptions = get_tags()
+            create_results_html.generate_report(data, tags, descriptions)
 
-                if not os.path.exists(os.path.join(args.logdir, current_commit_hash)):
-                    os.mkdir(os.path.join(args.logdir, current_commit_hash))
-                with open(f"{args.logdir}/{current_commit_hash}/{model}-run{i+args.runid}.p", 'wb') as f:
-                    pickle.dump(result, f)
-        else:
-            raise "Unreachable"
-
-    if args.generate_report:
-        tags, descriptions = get_tags()  # Assuming these functions are defined in your codebase
-        create_results_html.generate_report(data, tags, descriptions)
 
 if __name__ == "__main__":
     main()

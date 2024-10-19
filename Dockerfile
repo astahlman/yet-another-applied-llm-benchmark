@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
 
 ENV DEBIAN_FRONTEND noninteractive
 
-# Install Python 3.11
+# Install Python 3.12
 RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-venv \
@@ -31,8 +31,13 @@ RUN apt-get update && apt-get install -y \
 
 RUN rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
 
-RUN python3 -m pip install --upgrade pip && \
-    pip3 install numpy scipy numba Pillow jax jaxlib python-chess torch
+# Create and activate a virtual environment
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade pip and install packages in the virtual environment
+RUN pip install --upgrade pip && \
+    pip install numpy scipy numba Pillow jax jaxlib python-chess torch
 
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -40,7 +45,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 # Ensure Rust binaries are in PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-RUN ln -s /usr/bin/python3 /usr/bin/python
+RUN ln -s /usr/bin/python3.12 /usr/bin/python
 
 # Set the working directory in the container
 WORKDIR /usr/src/app

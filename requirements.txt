@@ -5,3 +5,5 @@ openai
 markdown
 pygments
 selenium
+tabulate
+tqdm
